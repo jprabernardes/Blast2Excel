@@ -1,72 +1,103 @@
 import os
 import re
 import pandas as pd
-from Bio import SeqIO
 
-# File path
-# Get the directory of the current script, put the file in the same directory as the script
+# Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
-file = os.path.join(script_dir, "example.gb") # Change this to your file name
-excel_output = os.path.join(script_dir, "blast_hits.xlsx")
 
-# Initialize variables
-tb = []
-sequence_blasted = None
+# Define input and output folder paths
+input_folder = os.path.join(script_dir, "input_folder")
+output_folder = os.path.join(script_dir, "output_folder")
+output_file = os.path.join(output_folder, "genbank_parsed_all.xlsx")
 
-# Function to initialize variables for a new OTU
-def reset_variables():
-    return {
-        "accession": None,
-        "definition": None,
-        "evalue": None,
-        "bitscore": None,
-        "Identity": None
-    }
+# Check and create folders with user feedback
+if not os.path.exists(input_folder):
+    os.makedirs(input_folder)
+    print(f"📁 'input_folder' was not found and has been created at: {input_folder}")
 
-# Initialize variables
-vars = reset_variables()
-with open(file, "r") as f:
-    for line in f:
-        line = line.strip()
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+    print(f"📁 'output_folder' was not found and has been created at: {output_folder}")
 
-        # Identify the start of a new OTU
+all_entries = []  # List to collect parsed entries
+
+# Iterate over all files in the input folder
+for filename in os.listdir(input_folder):
+    if not filename.endswith((".gb", ".gbk", ".fasta", ".txt")):
+        continue  # Skip unsupported files
+
+    filepath = os.path.join(input_folder, filename)
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+
+    i = 0
+    entry = {}
+
+    # Parse each line
+    while i < len(lines):
+        line = lines[i].strip()
+
         if line.startswith("LOCUS"):
-            partes = line.split()
-            sequence_blasted = partes[1] if len(partes) > 1 else "Unknown"
-            # Reset variables for the new OTU
-            vars = reset_variables()
+            if entry:
+                all_entries.append(entry)
+            entry = {
+                "File": filename,
+                "Accession": "",
+                "Definition": "",
+                "Organism": "",
+                "Host": "",
+                "Geo_location": "",
+                "Isolation_source": "",
+                "Features": []
+            }
 
-        # Extract fields
-        elif "/accession=" in line:
-            vars["accession"] = line.split('"')[1]
-        elif "/def=" in line:
-            vars["definition"] = line.split('"', 1)[1].strip()
-        elif "/E-value=" in line:
-            vars["evalue"] = line.split('"')[1]
-        elif "/bit-score=" in line:
-            vars["bitscore"] = line.split('"')[1]
-        elif "/identities=" in line:
-            match = re.search(r"\(([\d\.]+)%\)", line)
-            vars["Identity"] = float(match.group(1)) if match else None
+        elif line.startswith("ACCESSION"):
+            entry["Accession"] = line.split()[1]
 
-            # Check if all required fields are present
-            all_fields_present = all(vars[field] is not None for field in vars)
-            
-            if all_fields_present and sequence_blasted is not None:
-                # Add to the result (after the last required field)
-                tb.append({
-                    "Sequence-blasted": sequence_blasted,
-                    "Accession": vars["accession"],
-                    "Identity (%)": vars["Identity"],
-                    "E-value": vars["evalue"],
-                    "Bit Score": vars["bitscore"],
-                    "Definition": vars["definition"]
-                })
-                # Reset variables after adding to the table to prepare for the next hit
-                vars = reset_variables()
+        elif line.startswith("DEFINITION"):
+            def_lines = [line.replace("DEFINITION", "").strip()]
+            i += 1
+            while i < len(lines) and not lines[i].startswith("ACCESSION"):
+                def_lines.append(lines[i].strip())
+                i += 1
+            entry["Definition"] = " ".join(def_lines)
+            i -= 1
 
-# Export to Excel
-df = pd.DataFrame(tb)
-df.to_excel(excel_output, index=False)
+        elif line.strip().startswith("ORGANISM"):
+            org_lines = [line.strip().replace("ORGANISM", "").strip()]
+            i += 1
+            while i < len(lines) and lines[i].startswith(" "):
+                org_lines.append(lines[i].strip())
+                i += 1
+            entry["Organism"] = " ".join(org_lines)
+            i -= 1
 
-print(f"Spreadsheet saved to: {excel_output}")
+        elif "/host=" in line:
+            entry["Host"] = line.split('"')[1]
+        elif "/geo_loc_name=" in line:
+            entry["Geo_location"] = line.split('"')[1]
+        elif "/isolation_source=" in line:
+            entry["Isolation_source"] = line.split('"')[1]
+
+        elif re.match(r"^\s{5}\w+", line):
+            feature_type = line.strip().split()[0]
+            location = " ".join(line.strip().split()[1:])
+            i += 1
+            products = []
+            while i < len(lines) and lines[i].strip().startswith("/product="):
+                products.append(lines[i].strip().split('"')[1])
+                i += 1
+            entry["Features"].append(f"{feature_type} ({location}) → {', '.join(products)}")
+            i -= 1
+
+        i += 1
+
+    if entry:
+        all_entries.append(entry)
+
+# Save results to Excel
+df = pd.DataFrame(all_entries)
+df["Features"] = df["Features"].apply(lambda x: "\n".join(x))
+df.to_excel(output_file, index=False)
+
+print(f"✅ Spreadsheet saved to: {output_file}")
